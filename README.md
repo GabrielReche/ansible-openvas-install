@@ -5,7 +5,6 @@ Este playbook Ansible foi desenvolvido para automatizar a instalação do OpenVA
 
 Neste playbook:
 
-assos do Playbook:
 Atualização do índice de pacotes do APT:
 
 O playbook começa atualizando o índice de pacotes do APT nos servidores remotos para garantir que as operações subsequentes usem informações de pacotes atualizadas.
