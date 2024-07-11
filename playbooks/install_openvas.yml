@@ -1,0 +1,176 @@
+---
+- name: Playbook para instalar OpenVAS usando Docker Compose
+  hosts: all
+  become: true
+  tasks:
+    # Atualizar o índice de pacotes do APT
+    - name: Atualizar o índice de pacotes do APT
+      ansible.builtin.apt:
+        update_cache: yes
+
+    # Instalar pacotes necessários para APT usar um repositório via HTTPS
+    - name: Instalar pacotes necessários para APT usar um repositório via HTTPS
+      ansible.builtin.apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - software-properties-common
+        state: present
+
+    # Adicionar a chave GPG oficial do Docker
+    - name: Adicionar a chave GPG oficial do Docker
+      ansible.builtin.shell: |
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+      args:
+        creates: /usr/share/keyrings/docker-archive-keyring.gpg
+
+    # Adicionar o repositório do Docker
+    - name: Adicionar o repositório do Docker
+      ansible.builtin.shell: |
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+      args:
+        creates: /etc/apt/sources.list.d/docker.list
+
+    # Atualizar o índice de pacotes do APT novamente
+    - name: Atualizar o índice de pacotes do APT novamente
+      ansible.builtin.apt:
+        update_cache: yes
+
+    # Certificar-se de que está instalando a partir do repositório Docker
+    - name: Certificar-se de que está instalando a partir do repositório Docker
+      ansible.builtin.command:
+        cmd: apt-cache policy docker-ce
+
+    # Instalar o Docker
+    - name: Instalar o Docker
+      ansible.builtin.apt:
+        name: docker-ce
+        state: present
+
+    # Verificar se o Docker está instalado e funcionando
+    - name: Verificar se o Docker está instalado e funcionando
+      ansible.builtin.systemd:
+        name: docker
+        enabled: yes
+        state: started
+
+    # Baixar a versão mais recente do Docker Compose
+    - name: Baixar a versão mais recente do Docker Compose
+      ansible.builtin.shell: |
+        curl -L "https://github.com/docker/compose/releases/download/$(curl -s https://api.github.com/repos/docker/compose/releases/latest | grep -oP '"tag_name": "\K(.*)(?=")')/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+      args:
+        creates: /usr/local/bin/docker-compose
+
+    # Aplicar permissões executáveis ao binário do Docker Compose
+    - name: Aplicar permissões executáveis ao binário do Docker Compose
+      ansible.builtin.file:
+        path: /usr/local/bin/docker-compose
+        mode: "0755"
+
+    # Verificar se a instalação do Docker Compose foi bem-sucedida
+    - name: Verificar se a instalação do Docker Compose foi bem-sucedida
+      ansible.builtin.command:
+        cmd: docker-compose --version
+
+    # Adicionar o usuário atual ao grupo Docker
+    - name: Adicionar o usuário atual ao grupo Docker
+      ansible.builtin.user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: yes
+
+    # Verificar a versão do Docker
+    - name: Verificar a versão do Docker
+      ansible.builtin.command:
+        cmd: docker --version
+
+    # Verificar a versão do Docker Compose
+    - name: Verificar a versão do Docker Compose
+      ansible.builtin.command:
+        cmd: docker-compose --version
+
+    # Criar diretório /dl na raiz
+    - name: Criar diretório /dl na raiz
+      ansible.builtin.file:
+        path: /dl
+        state: directory
+        mode: "0755"
+
+    # Copiar arquivo docker-compose.yml para o diretório /dl na máquina de destino
+    - name: Copiar arquivo docker-compose.yml para o diretório /dl na máquina de destino
+      ansible.builtin.copy:
+        src: docker-compose.yml
+        dest: /dl/docker-compose.yml
+
+    # Executar Docker Compose para iniciar os serviços definidos no arquivo docker-compose.yml
+    - name: Executar Docker Compose
+      ansible.builtin.shell: |
+        docker-compose -f /dl/docker-compose.yml -p greenbone-community-edition up -d
+
+    # Esperar 60 segundos para o ambiente subir
+    - name: Esperar 60 segundos para o ambiente subir
+      ansible.builtin.pause:
+        seconds: 60
+
+    # Verificar se o serviço gvmd está ativo
+    - name: Verificar se o serviço gvmd está ativo
+      ansible.builtin.shell: |
+        docker-compose -f /dl/docker-compose.yml -p greenbone-community-edition exec gvmd gvmd --version
+      register: gvmd_status
+      retries: 10
+      delay: 15
+      until: gvmd_status.rc == 0
+
+    # Trocar a senha de admin da interface gráfica
+    - name: Trocar a senha de admin da interface gráfica
+      ansible.builtin.shell: |
+        docker-compose -f /dl/docker-compose.yml -p greenbone-community-edition exec -u gvmd gvmd gvmd --user=admin --new-password='senhanova'
+      register: change_password
+      failed_when: change_password.rc != 0
+      retries: 5
+      delay: 15
+
+    # Exibir saída da troca de senha para depuração
+    - name: Exibir saída da troca de senha
+      ansible.builtin.debug:
+        msg: "Saída: {{ change_password.stdout }} - Erro: {{ change_password.stderr }}"
+
+    # Criar script sync-openvas.sh no diretório /dl com os comandos fornecidos
+    - name: Criar script sync-openvas.sh no diretório /dl
+      ansible.builtin.copy:
+        content: |
+          #!/bin/bash
+          . ~/profile
+          docker compose -f /dl/docker-compose.yml -p greenbone-community-edition pull notus-data vulnerability-tests scap-data dfn-cert-data cert-bund-data report-formats data-objects
+          docker compose -f /dl/docker-compose.yml -p greenbone-community-edition up -d notus-data vulnerability-tests scap-data dfn-cert-data cert-bund-data report-formats data-objects
+        dest: /dl/sync-openvas.sh
+        mode: "0755"
+
+    # Aplicar permissões executáveis ao script sync-openvas.sh
+    - name: Aplicar permissões executáveis ao script sync-openvas.sh
+      ansible.builtin.file:
+        path: /dl/sync-openvas.sh
+        mode: "0755"
+
+    # Instalar pacote cron para fornecer o comando crontab
+    - name: Instalar o pacote cron
+      ansible.builtin.apt:
+        name: cron
+        state: present
+
+    # Garantir que o serviço cron esteja ativo e habilitado
+    - name: Garantir que o serviço cron esteja ativo e habilitado
+      ansible.builtin.systemd:
+        name: cron
+        enabled: yes
+        state: started
+
+    # Adicionar tarefa ao crontab para executar o script sync-openvas.sh diariamente às 12:00
+    - name: Adicionar tarefa ao crontab para executar o script sync-openvas.sh
+      ansible.builtin.cron:
+        name: "Sincronizar e iniciar Greenbone Community Edition"
+        minute: "00"
+        hour: "12"
+        job: "/dl/sync-openvas.sh >> /dl/run_greenbone.log 2>&1"
+        user: root

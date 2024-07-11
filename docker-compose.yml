@@ -1,0 +1,234 @@
+services:
+  # Serviço para testes de vulnerabilidade usando a imagem greenbone/vulnerability-tests
+  vulnerability-tests:
+    image: greenbone/vulnerability-tests
+    environment:
+      STORAGE_PATH: /var/lib/openvas/22.04/vt-data/nasl # Caminho para armazenamento dos dados NASL
+    volumes:
+      - vt_data_vol:/mnt # Montagem do volume para armazenar dados de testes de vulnerabilidade
+
+  # Serviço para dados Notus
+  notus-data:
+    image: greenbone/notus-data
+    volumes:
+      - notus_data_vol:/mnt # Montagem do volume para armazenar dados Notus
+
+  # Serviço para dados SCAP
+  scap-data:
+    image: greenbone/scap-data
+    volumes:
+      - scap_data_vol:/mnt # Montagem do volume para armazenar dados SCAP
+
+  # Serviço para dados CERT Bund
+  cert-bund-data:
+    image: greenbone/cert-bund-data
+    volumes:
+      - cert_data_vol:/mnt # Montagem do volume para armazenar dados CERT
+
+  # Serviço para dados DFN CERT
+  dfn-cert-data:
+    image: greenbone/dfn-cert-data
+    volumes:
+      - cert_data_vol:/mnt # Montagem do volume para armazenar dados DFN CERT
+    depends_on:
+      - cert-bund-data # Dependência do serviço cert-bund-data
+
+  # Serviço para objetos de dados
+  data-objects:
+    image: greenbone/data-objects
+    volumes:
+      - data_objects_vol:/mnt # Montagem do volume para armazenar objetos de dados
+
+  # Serviço para formatos de relatórios
+  report-formats:
+    image: greenbone/report-formats
+    volumes:
+      - data_objects_vol:/mnt # Montagem do volume para armazenar formatos de relatórios
+    depends_on:
+      - data-objects # Dependência do serviço data-objects
+
+  # Serviço para dados GPG
+  gpg-data:
+    image: greenbone/gpg-data
+    volumes:
+      - gpg_data_vol:/mnt # Montagem do volume para armazenar dados GPG
+
+  # Serviço Redis
+  redis-server:
+    image: greenbone/redis-server
+    restart: on-failure # Reinicia o contêiner em caso de falha
+    volumes:
+      - redis_socket_vol:/run/redis/ # Montagem do volume para armazenamento de socket Redis
+
+  # Serviço PostgreSQL para GVM
+  pg-gvm:
+    image: greenbone/pg-gvm:stable
+    restart: on-failure # Reinicia o contêiner em caso de falha
+    volumes:
+      - psql_data_vol:/var/lib/postgresql # Montagem do volume para armazenar dados do PostgreSQL
+      - psql_socket_vol:/var/run/postgresql # Montagem do volume para armazenar socket do PostgreSQL
+
+  # Serviço para o gerenciador de vulnerabilidades (GVMD)
+  gvmd:
+    image: greenbone/gvmd:stable
+    restart: on-failure # Reinicia o contêiner em caso de falha
+    volumes:
+      - gvmd_data_vol:/var/lib/gvm # Montagem do volume para armazenar dados do GVMD
+      - scap_data_vol:/var/lib/gvm/scap-data/ # Montagem do volume para armazenar dados SCAP
+      - cert_data_vol:/var/lib/gvm/cert-data # Montagem do volume para armazenar dados CERT
+      - data_objects_vol:/var/lib/gvm/data-objects/gvmd # Montagem do volume para armazenar objetos de dados do GVMD
+      - vt_data_vol:/var/lib/openvas/plugins # Montagem do volume para armazenar plugins de vulnerabilidade
+      - psql_data_vol:/var/lib/postgresql # Montagem do volume para armazenar dados do PostgreSQL
+      - gvmd_socket_vol:/run/gvmd # Montagem do volume para armazenar socket do GVMD
+      - ospd_openvas_socket_vol:/run/ospd # Montagem do volume para armazenar socket do OSPD OpenVAS
+      - psql_socket_vol:/var/run/postgresql # Montagem do volume para armazenar socket do PostgreSQL
+    depends_on:
+      pg-gvm: # Dependências do serviço GVMD
+        condition: service_started
+      scap-data:
+        condition: service_completed_successfully
+      cert-bund-data:
+        condition: service_completed_successfully
+      dfn-cert-data:
+        condition: service_completed_successfully
+      data-objects:
+        condition: service_completed_successfully
+      report-formats:
+        condition: service_completed_successfully
+
+  # Serviço para a interface web do GVM (GSA)
+  gsa:
+    image: greenbone/gsa:stable
+    restart: on-failure # Reinicia o contêiner em caso de falha
+    ports:
+      - "9392:80" # Mapeamento de porta para acessar a interface web do GSA
+    volumes:
+      - gvmd_socket_vol:/run/gvmd # Montagem do volume para armazenar socket do GVMD
+    depends_on:
+      - gvmd # Dependência do serviço GVMD
+
+  # Serviço para configurar o OpenVAS
+  configure-openvas:
+    image: greenbone/openvas-scanner:stable
+    volumes:
+      - openvas_data_vol:/mnt # Montagem do volume para armazenar dados do OpenVAS
+      - openvas_log_data_vol:/var/log/openvas # Montagem do volume para armazenar logs do OpenVAS
+    command:
+      - /bin/sh
+      - -c
+      - |
+        printf "table_driven_lsc = yes\nopenvasd_server = http://openvasd:80\n" > /mnt/openvas.conf
+        sed "s/127/128/" /etc/openvas/openvas_log.conf | sed 's/gvm/openvas/' > /mnt/openvas_log.conf
+        chmod 644 /mnt/openvas.conf
+        chmod 644 /mnt/openvas_log.conf
+        touch /var/log/openvas/openvas.log
+        chmod 666 /var/log/openvas/openvas.log
+
+  # Serviço para exibir logs do OpenVAS
+  openvas:
+    image: greenbone/openvas-scanner:stable
+    restart: on-failure # Reinicia o contêiner em caso de falha
+    volumes:
+      - openvas_data_vol:/etc/openvas # Montagem do volume para armazenar dados do OpenVAS
+      - openvas_log_data_vol:/var/log/openvas # Montagem do volume para armazenar logs do OpenVAS
+    command:
+      - /bin/sh
+      - -c
+      - |
+        cat /etc/openvas/openvas.conf
+        tail -f /var/log/openvas/openvas.log
+    depends_on:
+      configure-openvas: # Dependência do serviço configure-openvas
+        condition: service_completed_successfully
+
+  # Serviço OpenVASD
+  openvasd:
+    image: greenbone/openvas-scanner:stable
+    restart: on-failure # Reinicia o contêiner em caso de falha
+    environment:
+      OPENVASD_MOD: service_notus # Módulo do OpenVASD
+      GNUPGHOME: /etc/openvas/gnupg # Caminho do diretório GNUPG
+      LISTENING: 0.0.0.0:80 # Endereço e porta de escuta do OpenVASD
+    volumes:
+      - openvas_data_vol:/etc/openvas # Montagem do volume para armazenar dados do OpenVAS
+      - openvas_log_data_vol:/var/log/openvas # Montagem do volume para armazenar logs do OpenVAS
+      - gpg_data_vol:/etc/openvas/gnupg # Montagem do volume para armazenar dados GNUPG
+      - notus_data_vol:/var/lib/notus # Montagem do volume para armazenar dados Notus
+    depends_on:
+      vulnerability-tests: # Dependências do serviço OpenVASD
+        condition: service_completed_successfully
+      configure-openvas:
+        condition: service_completed_successfully
+      gpg-data:
+        condition: service_completed_successfully
+    networks:
+      default:
+        aliases:
+          - openvasd
+
+  # Serviço OSPD OpenVAS
+  ospd-openvas:
+    image: greenbone/ospd-openvas:stable
+    restart: on-failure # Reinicia o contêiner em caso de falha
+    hostname: ospd-openvas.local # Nome do host para o OSPD OpenVAS
+    cap_add:
+      - NET_ADMIN # Permissão para captura de pacotes em modo promíscuo
+      - NET_RAW # Permissão para uso de sockets brutos
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
+    command:
+      [
+        "ospd-openvas",
+        "-f",
+        "--config",
+        "/etc/gvm/ospd-openvas.conf",
+        "--notus-feed-dir",
+        "/var/lib/notus/advisories",
+        "-m",
+        "666",
+      ]
+    volumes:
+      - gpg_data_vol:/etc/openvas/gnupg # Montagem do volume para armazenar dados GNUPG
+      - vt_data_vol:/var/lib/openvas/plugins # Montagem do volume para armazenar plugins de vulnerabilidade
+      - notus_data_vol:/var/lib/notus # Montagem do volume para armazenar dados Notus
+      - ospd_openvas_socket_vol:/run/ospd # Montagem do volume para armazenar socket do OSPD
+      - redis_socket_vol:/run/redis/ # Montagem do volume para armazenar socket Redis
+      - openvas_data_vol:/etc/openvas/ # Montagem do volume para armazenar dados do OpenVAS
+      - openvas_log_data_vol:/var/log/openvas # Montagem do volume para armazenar logs do OpenVAS
+    depends_on:
+      redis-server: # Dependências do serviço OSPD OpenVAS
+        condition: service_started
+      gpg-data:
+        condition: service_completed_successfully
+      vulnerability-tests:
+        condition: service_completed_successfully
+      configure-openvas:
+        condition: service_completed_successfully
+
+  # Serviço GVM Tools
+  gvm-tools:
+    image: greenbone/gvm-tools
+    volumes:
+      - gvmd_socket_vol:/run/gvmd # Montagem do volume para armazenar socket do GVMD
+      - ospd_openvas_socket_vol:/run/ospd # Montagem do volume para armazenar socket do OSPD
+    depends_on:
+      - gvmd # Dependência do serviço GVMD
+      - ospd-openvas # Dependência do serviço OSPD OpenVAS
+
+# Definição dos volumes utilizados pelos serviços
+volumes:
+  gpg_data_vol:
+  scap_data_vol:
+  cert_data_vol:
+  data_objects_vol:
+  gvmd_data_vol:
+  psql_data_vol:
+  vt_data_vol:
+  notus_data_vol:
+  psql_socket_vol:
+  gvmd_socket_vol:
+  ospd_openvas_socket_vol:
+  redis_socket_vol:
+  openvas_data_vol:
+  openvas_log_data_vol:
